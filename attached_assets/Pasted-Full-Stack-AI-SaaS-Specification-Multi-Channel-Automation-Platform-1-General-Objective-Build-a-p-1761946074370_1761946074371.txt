@@ -1,0 +1,359 @@
+Full-Stack AI SaaS Specification — Multi-Channel Automation Platform
+1. General Objective
+
+Build a production-grade multi-tenant SaaS application for online businesses.
+The system will integrate with Meta Graph API (WhatsApp, Instagram, Facebook Messenger) and allow each business to deploy an AI agent that automatically answers customer inquiries, takes product orders or service appointments, manages inventory or scheduling, tracks financials, and provides role-based dashboards.
+
+The app must be modular, scalable, and secure, supporting hundreds of client businesses simultaneously.
+
+2. Technology Stack
+Backend
+
+Language: TypeScript
+
+Framework: NestJS (preferred) or Express.js
+
+Database: PostgreSQL (with Prisma ORM)
+
+Cache / Queue: Redis (for caching, job queues, and session memory)
+
+Message Queue: BullMQ for task scheduling and concurrency
+
+AI Engine: Gemini API (primary) and OpenAI API (fallback)
+
+Webhooks: Meta Graph API for incoming messages, Stripe for payments
+
+Scheduler: BullMQ + cron jobs for subscription renewals and deactivations
+
+Containerization: Docker + docker-compose
+
+Deployment: Render / Railway / AWS ECS
+
+Testing: Jest for unit and integration tests
+
+Logging: Winston + centralized logging to CloudWatch or equivalent
+
+Frontend
+
+Framework: Next.js 15 (React + TypeScript)
+
+Styling: TailwindCSS + Headless UI
+
+Charts: Recharts or Chart.js for analytics
+
+State Management: Zustand or Redux Toolkit
+
+Auth / Session: JWT tokens stored securely in cookies
+
+Real-time updates: WebSocket / Socket.io
+
+Integrations
+
+Meta Graph API (WhatsApp, Instagram, Messenger)
+
+Google Gemini API
+
+Google Calendar API (for appointment scheduling)
+
+Stripe API (subscription billing)
+
+Google Sheets API (optional export)
+
+3. Authentication and Access Control
+Endpoints
+
+POST /auth/register → register new business
+
+POST /auth/login → issue JWT token
+
+POST /auth/logout → invalidate session
+
+Roles
+
+Owner: full access
+
+Order Manager: limited to orders/appointments
+
+Accountant: limited to financial data
+
+Multi-Tenancy Logic
+
+Each tenant (shop) is identified by a shop_id
+
+All DB queries are scoped by shop_id
+
+Shared tables use composite keys like (shop_id, record_id)
+
+4. Meta Webhook Handling
+Routes
+
+POST /webhook/meta — receives new message events
+
+GET /webhook/meta — verification endpoint for Meta
+
+Workflow
+
+Extract platform (WhatsApp, Instagram, Messenger).
+
+Identify shop_id by matching the page_id or phone_number_id.
+
+Retrieve chat history from Redis (session_key = shop_id + sender_id + platform).
+
+Send current message and context to Gemini API.
+
+Receive AI reply → store in DB → forward via Meta API response.
+
+Log conversation to PostgreSQL.
+
+5. AI Agent Behavior
+Two AI Flows
+
+Product-Based Flow
+
+Access product DB for descriptions, pricing, stock.
+
+Handle order creation and confirmation.
+
+Update stock and compute profit metrics.
+
+Service-Based Flow
+
+Access service list with durations and pricing.
+
+Retrieve available slots via Google Calendar API.
+
+Confirm or reschedule appointments automatically.
+
+Memory Handling
+
+Store last 10 message exchanges in Redis under session key.
+
+On each message, append user + AI text to memory.
+
+If conversation inactive > 24h → archive to PostgreSQL and clear Redis.
+
+Human Intervention
+
+If message includes “human”, “support”, “help”, etc.:
+
+Mark AI session as paused in DB.
+
+Send confirmation to customer:
+
+“A human agent will contact you shortly.”
+
+Notify owner by email or WhatsApp.
+
+AI ignores new messages until owner resumes the session.
+
+6. Orders and Inventory System
+Tables
+shops (
+  id SERIAL PRIMARY KEY,
+  name TEXT,
+  owner_email TEXT,
+  plan TEXT,
+  status TEXT,
+  created_at TIMESTAMP
+);
+
+products (
+  id SERIAL PRIMARY KEY,
+  shop_id INT REFERENCES shops(id),
+  name TEXT,
+  description TEXT,
+  price NUMERIC,
+  cost NUMERIC,
+  stock INT
+);
+
+orders (
+  id SERIAL PRIMARY KEY,
+  shop_id INT REFERENCES shops(id),
+  product_id INT REFERENCES products(id),
+  quantity INT,
+  price NUMERIC,
+  cost NUMERIC,
+  revenue NUMERIC,
+  profit NUMERIC,
+  customer_name TEXT,
+  platform TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+Endpoints
+
+GET /products — list products for a shop
+
+POST /products — add or update product
+
+POST /orders — create new order
+
+GET /orders — list all orders
+
+GET /orders/summary — compute totals (revenue, profit, cost)
+
+Logic
+
+When AI detects order intent, it:
+
+Checks stock level.
+
+Confirms with user.
+
+Inserts order record.
+
+Decreases stock.
+
+Updates profit and revenue metrics.
+
+7. Appointments and Scheduling
+Tables
+appointments (
+  id SERIAL PRIMARY KEY,
+  shop_id INT REFERENCES shops(id),
+  customer_name TEXT,
+  phone TEXT,
+  service_name TEXT,
+  date TIMESTAMP,
+  status TEXT
+);
+
+Endpoints
+
+GET /appointments — list shop appointments
+
+POST /appointments — create or update
+
+GET /appointments/available — fetch Google Calendar availability
+
+Logic
+
+When customer requests an appointment:
+
+AI reads free slots from Google Calendar.
+
+Suggests options.
+
+Confirms booking and saves to DB.
+
+Updates Google Calendar with appointment event.
+
+8. Subscriptions and Billing
+Plans
+Plan	Price	Features
+Starter	$29/mo	1 platform, 200 messages/month
+Pro	$59/mo	All platforms, dashboard
+Business	$99/mo	Unlimited, team roles
+Tables
+subscriptions (
+  id SERIAL PRIMARY KEY,
+  shop_id INT REFERENCES shops(id),
+  plan TEXT,
+  status TEXT,
+  expiry_date TIMESTAMP,
+  payment_method TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+Endpoints
+
+POST /subscriptions/create-checkout → Stripe session
+
+POST /subscriptions/webhook → Stripe event listener
+
+GET /subscriptions/status → return active/inactive state
+
+Logic
+
+On payment success, extend expiry_date by 30 days.
+
+Cron job runs daily to check expirations and deactivate unpaid shops.
+
+When inactive, Meta replies with:
+
+“Your AI assistant is currently inactive. Please renew your subscription.”
+
+9. Dashboards and Analytics
+Dashboards
+
+Owner Dashboard
+
+KPIs: total sales, revenue, cost, profit, active subscriptions
+
+Charts: daily revenue, best-selling products, cost vs profit
+
+Order Manager Dashboard
+
+Shows only orders and fulfillment stats.
+
+Accountant Dashboard
+
+Revenue, cost, and profit reports.
+
+Endpoints
+
+GET /dashboard/summary — total sales, profit, etc.
+
+GET /dashboard/charts — data for time-series charts
+
+Frontend Logic
+
+Built with Next.js pages: /dashboard, /orders, /products, /appointments
+
+Uses JWT auth.
+
+Uses WebSocket for live updates when orders or payments change.
+
+10. Logging and Monitoring
+
+Store all incoming/outgoing webhook events in logs table:
+
+logs (id SERIAL, shop_id INT, platform TEXT, event TEXT, payload JSONB, created_at TIMESTAMP);
+
+
+Add error and performance logging via Winston.
+
+Provide /admin/logs endpoint (secured) for debugging.
+
+11. Security and Privacy
+
+Use HTTPS and secure cookies.
+
+Hash passwords with bcrypt.
+
+Encrypt all third-party tokens (Meta, Stripe, Google).
+
+Validate payload signatures for Meta and Stripe webhooks.
+
+Tenant isolation enforced through middleware that injects shop_id context.
+
+12. Performance Targets
+
+3s max response time per message.
+
+100 concurrent customers handled via queue.
+
+Redis TTL for message history: 24 hours (then archived to DB).
+
+13. Deliverables
+
+Complete source code for backend and frontend.
+
+Docker setup with all services (Node.js, PostgreSQL, Redis).
+
+API documentation (Swagger or Postman collection).
+
+.env.example with configuration keys.
+
+Deployment guide (Render / Railway / AWS ECS).
+
+Admin credentials and sample tenant for testing.
+
+14. Testing & Quality
+
+Unit tests for API routes.
+
+Integration tests for webhook flow.
+
+E2E test simulating customer → AI → order creation → dashboard update.
