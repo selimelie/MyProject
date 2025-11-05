@@ -173,11 +173,23 @@ export class SubscriptionAutomation {
         }
 
         // Retrieve the Stripe subscription
-        const stripeSubscription = await stripe.subscriptions.retrieve(shop.stripeSubscriptionId);
+        const stripeSubscriptionResponse = await stripe.subscriptions.retrieve(shop.stripeSubscriptionId, {
+          expand: ['items.data'],
+        });
+        const stripeSubscription = stripeSubscriptionResponse as Stripe.Subscription;
 
         if (stripeSubscription.status === 'active' || stripeSubscription.status === 'trialing') {
-          // Stripe subscription is active, extend expiry date
-          const newExpiryDate = new Date(stripeSubscription.current_period_end * 1000);
+          const currentPeriodEnd = stripeSubscription.items?.data?.reduce((latest, item) => {
+            const periodEnd = typeof item.current_period_end === 'number' ? item.current_period_end : 0;
+            return periodEnd > latest ? periodEnd : latest;
+          }, 0) ?? 0;
+
+          if (!currentPeriodEnd) {
+            console.warn(`[Subscription Automation] Missing current_period_end for subscription ${shop.stripeSubscriptionId}`);
+            continue;
+          }
+
+          const newExpiryDate = new Date(currentPeriodEnd * 1000);
 
           await db
             .update(subscriptions)

@@ -1,53 +1,28 @@
-import { google } from 'googleapis';
+import { google, type calendar_v3 } from 'googleapis';
 
-let connectionSettings: any;
+const calendarScopes = ['https://www.googleapis.com/auth/calendar'];
+let calendarClient: calendar_v3.Calendar | null = null;
 
-async function getAccessToken() {
-  if (connectionSettings && connectionSettings.settings.expires_at && new Date(connectionSettings.settings.expires_at).getTime() > Date.now()) {
-    return connectionSettings.settings.access_token;
-  }
-  
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY 
-    ? 'repl ' + process.env.REPL_IDENTITY 
-    : process.env.WEB_REPL_RENEWAL 
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL 
-    : null;
+function getCalendarResources() {
+  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  const privateKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
+  const calendarId = process.env.GOOGLE_CALENDAR_ID || 'primary';
 
-  if (!xReplitToken) {
-    throw new Error('X_REPLIT_TOKEN not found for repl/depl');
+  if (!clientEmail || !privateKey) {
+    throw new Error('Google Calendar service account credentials are not configured');
   }
 
-  connectionSettings = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=google-calendar',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X_REPLIT_TOKEN': xReplitToken
-      }
-    }
-  ).then(res => res.json()).then(data => data.items?.[0]);
-
-  const accessToken = connectionSettings?.settings?.access_token || connectionSettings.settings?.oauth?.credentials?.access_token;
-
-  if (!connectionSettings || !accessToken) {
-    throw new Error('Google Calendar not connected');
+  if (!calendarClient) {
+    const normalizedKey = privateKey.replace(/\\n/g, '\n');
+    const auth = new google.auth.JWT({
+      email: clientEmail,
+      key: normalizedKey,
+      scopes: calendarScopes,
+    });
+    calendarClient = google.calendar({ version: 'v3', auth });
   }
-  return accessToken;
-}
 
-// WARNING: Never cache this client.
-// Access tokens expire, so a new client must be created each time.
-// Always call this function again to get a fresh client.
-export async function getUncachableGoogleCalendarClient() {
-  const accessToken = await getAccessToken();
-
-  const oauth2Client = new google.auth.OAuth2();
-  oauth2Client.setCredentials({
-    access_token: accessToken
-  });
-
-  return google.calendar({ version: 'v3', auth: oauth2Client });
+  return { calendar: calendarClient, calendarId };
 }
 
 // Check availability for a specific time slot
@@ -56,15 +31,15 @@ export async function checkAvailability(
   durationMinutes: number
 ): Promise<boolean> {
   try {
-    const calendar = await getUncachableGoogleCalendarClient();
-    
+    const { calendar, calendarId } = getCalendarResources();
+
     const endTime = new Date(date.getTime() + durationMinutes * 60000);
 
     const response = await calendar.freebusy.query({
       requestBody: {
         timeMin: date.toISOString(),
         timeMax: endTime.toISOString(),
-        items: [{ id: 'primary' }],
+        items: [{ id: calendarId }],
       },
     });
 
@@ -85,7 +60,7 @@ export async function getAvailableSlots(
   endHour: number = 17
 ): Promise<Date[]> {
   try {
-    const calendar = await getUncachableGoogleCalendarClient();
+    const { calendar, calendarId } = getCalendarResources();
     
     const dayStart = new Date(date);
     dayStart.setHours(startHour, 0, 0, 0);
@@ -97,7 +72,7 @@ export async function getAvailableSlots(
       requestBody: {
         timeMin: dayStart.toISOString(),
         timeMax: dayEnd.toISOString(),
-        items: [{ id: 'primary' }],
+        items: [{ id: calendarId }],
       },
     });
 
@@ -142,7 +117,7 @@ export async function createCalendarEvent(
   customerPhone?: string
 ): Promise<string | null> {
   try {
-    const calendar = await getUncachableGoogleCalendarClient();
+    const { calendar, calendarId } = getCalendarResources();
     
     const endTime = new Date(date.getTime() + durationMinutes * 60000);
 
@@ -160,7 +135,7 @@ export async function createCalendarEvent(
     };
 
     const response = await calendar.events.insert({
-      calendarId: 'primary',
+      calendarId,
       requestBody: event,
     });
 

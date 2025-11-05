@@ -2,7 +2,6 @@ import { sql } from "drizzle-orm";
 import { relations } from "drizzle-orm";
 import { pgTable, text, varchar, integer, numeric, timestamp, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
-import { z } from "zod";
 
 // ==================== SHOPS (TENANTS) ====================
 export const shops = pgTable("shops", {
@@ -31,12 +30,9 @@ export const shopsRelations = relations(shops, ({ many, one }) => ({
   }),
 }));
 
-export const insertShopSchema = createInsertSchema(shops).omit({
-  id: true,
-  createdAt: true,
-});
+export const insertShopSchema = createInsertSchema(shops);
 
-export type InsertShop = z.infer<typeof insertShopSchema>;
+export type InsertShop = typeof shops.$inferInsert;
 export type Shop = typeof shops.$inferSelect;
 
 // ==================== USERS ====================
@@ -57,12 +53,9 @@ export const usersRelations = relations(users, ({ one }) => ({
   }),
 }));
 
-export const insertUserSchema = createInsertSchema(users).omit({
-  id: true,
-  createdAt: true,
-});
+export const insertUserSchema = createInsertSchema(users);
 
-export type InsertUser = z.infer<typeof insertUserSchema>;
+export type InsertUser = typeof users.$inferInsert;
 export type User = typeof users.$inferSelect;
 
 // ==================== PRODUCTS ====================
@@ -86,12 +79,9 @@ export const productsRelations = relations(products, ({ one, many }) => ({
   orders: many(orders),
 }));
 
-export const insertProductSchema = createInsertSchema(products).omit({
-  id: true,
-  createdAt: true,
-});
+export const insertProductSchema = createInsertSchema(products);
 
-export type InsertProduct = z.infer<typeof insertProductSchema>;
+export type InsertProduct = typeof products.$inferInsert;
 export type Product = typeof products.$inferSelect;
 
 // ==================== SERVICES ====================
@@ -114,12 +104,9 @@ export const servicesRelations = relations(services, ({ one, many }) => ({
   appointments: many(appointments),
 }));
 
-export const insertServiceSchema = createInsertSchema(services).omit({
-  id: true,
-  createdAt: true,
-});
+export const insertServiceSchema = createInsertSchema(services);
 
-export type InsertService = z.infer<typeof insertServiceSchema>;
+export type InsertService = typeof services.$inferInsert;
 export type Service = typeof services.$inferSelect;
 
 // ==================== ORDERS ====================
@@ -151,12 +138,9 @@ export const ordersRelations = relations(orders, ({ one }) => ({
   }),
 }));
 
-export const insertOrderSchema = createInsertSchema(orders).omit({
-  id: true,
-  createdAt: true,
-});
+export const insertOrderSchema = createInsertSchema(orders);
 
-export type InsertOrder = z.infer<typeof insertOrderSchema>;
+export type InsertOrder = typeof orders.$inferInsert;
 export type Order = typeof orders.$inferSelect;
 
 // ==================== APPOINTMENTS ====================
@@ -187,12 +171,9 @@ export const appointmentsRelations = relations(appointments, ({ one }) => ({
   }),
 }));
 
-export const insertAppointmentSchema = createInsertSchema(appointments).omit({
-  id: true,
-  createdAt: true,
-});
+export const insertAppointmentSchema = createInsertSchema(appointments);
 
-export type InsertAppointment = z.infer<typeof insertAppointmentSchema>;
+export type InsertAppointment = typeof appointments.$inferInsert;
 export type Appointment = typeof appointments.$inferSelect;
 
 // ==================== SUBSCRIPTIONS ====================
@@ -214,13 +195,9 @@ export const subscriptionsRelations = relations(subscriptions, ({ one }) => ({
   }),
 }));
 
-export const insertSubscriptionSchema = createInsertSchema(subscriptions).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
-});
+export const insertSubscriptionSchema = createInsertSchema(subscriptions);
 
-export type InsertSubscription = z.infer<typeof insertSubscriptionSchema>;
+export type InsertSubscription = typeof subscriptions.$inferInsert;
 export type Subscription = typeof subscriptions.$inferSelect;
 
 // ==================== CONVERSATIONS ====================
@@ -244,12 +221,9 @@ export const conversationsRelations = relations(conversations, ({ one, many }) =
   messages: many(messages),
 }));
 
-export const insertConversationSchema = createInsertSchema(conversations).omit({
-  id: true,
-  createdAt: true,
-});
+export const insertConversationSchema = createInsertSchema(conversations);
 
-export type InsertConversation = z.infer<typeof insertConversationSchema>;
+export type InsertConversation = typeof conversations.$inferInsert;
 export type Conversation = typeof conversations.$inferSelect;
 
 // ==================== MESSAGES ====================
@@ -268,10 +242,7 @@ export const messagesRelations = relations(messages, ({ one }) => ({
   }),
 }));
 
-export const insertMessageSchema = createInsertSchema(messages).omit({
-  id: true,
-  createdAt: true,
-});
+export const insertMessageSchema = createInsertSchema(messages);
 
-export type InsertMessage = z.infer<typeof insertMessageSchema>;
+export type InsertMessage = typeof messages.$inferInsert;
 export type Message = typeof messages.$inferSelect;
