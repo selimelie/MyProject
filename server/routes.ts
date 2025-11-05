@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { generateAIResponse, parseIntent } from "./ai";
 import { checkAvailability, getAvailableSlots, createCalendarEvent } from "./calendar";
+import { exportCatalogToSheets, isSheetsConfigured, syncCatalogFromSheets } from "./sheets";
 import bcrypt from "bcrypt";
 import { sql } from "drizzle-orm";
 import { db } from "./db";
@@ -387,6 +388,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ message: "Service deleted" });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
+    }
+  });
+
+  // ==================== GOOGLE SHEETS SYNC ====================
+  app.get("/api/integrations/sheets/status", requireAuth, requireRole("owner"), (_req, res) => {
+    res.json({ configured: isSheetsConfigured() });
+  });
+
+  app.post("/api/integrations/sheets/import", requireAuth, requireRole("owner"), async (req, res) => {
+    try {
+      if (!isSheetsConfigured()) {
+        return res.status(503).json({ message: "Google Sheets integration is not configured" });
+      }
+
+      const user = req.user as any;
+      const result = await syncCatalogFromSheets(user.shopId);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Google Sheets import failed:", error);
+      res.status(500).json({ message: error.message || "Failed to import catalog from Google Sheets" });
+    }
+  });
+
+  app.post("/api/integrations/sheets/export", requireAuth, requireRole("owner"), async (req, res) => {
+    try {
+      if (!isSheetsConfigured()) {
+        return res.status(503).json({ message: "Google Sheets integration is not configured" });
+      }
+
+      const user = req.user as any;
+      const result = await exportCatalogToSheets(user.shopId);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Google Sheets export failed:", error);
+      res.status(500).json({ message: error.message || "Failed to export catalog to Google Sheets" });
     }
   });
 
