@@ -77,7 +77,7 @@ export interface IStorage {
   // Conversations
   getConversations(shopId: number): Promise<Conversation[]>;
   getConversation(id: number, shopId: number): Promise<Conversation | undefined>;
-  getConversationByCustomerId(customerId: string): Promise<Conversation | undefined>;
+  getConversationByCustomerId(customerId: string, shopId: number): Promise<Conversation | undefined>;
   getPausedConversations(shopId: number): Promise<Conversation[]>;
   createConversation(conversation: InsertConversation): Promise<Conversation>;
   updateConversation(id: number, shopId: number, data: Partial<InsertConversation>): Promise<Conversation>;
@@ -302,11 +302,11 @@ export class DatabaseStorage implements IStorage {
     return conversation || undefined;
   }
 
-  async getConversationByCustomerId(customerId: string): Promise<Conversation | undefined> {
+  async getConversationByCustomerId(customerId: string, shopId: number): Promise<Conversation | undefined> {
     const [conversation] = await db
       .select()
       .from(conversations)
-      .where(eq(conversations.customerId, customerId))
+      .where(and(eq(conversations.customerId, customerId), eq(conversations.shopId, shopId)))
       .orderBy(sql`${conversations.id} DESC`)
       .limit(1);
     return conversation || undefined;
