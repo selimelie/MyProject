@@ -1,41 +1,20 @@
 import { Resend } from 'resend';
 
-let connectionSettings: any;
+let cachedClient: Resend | null = null;
 
-async function getCredentials() {
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY 
-    ? 'repl ' + process.env.REPL_IDENTITY 
-    : process.env.WEB_REPL_RENEWAL 
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL 
-    : null;
+function getResendConfiguration() {
+  const apiKey = process.env.RESEND_API_KEY;
+  const fromEmail = process.env.RESEND_FROM_EMAIL;
 
-  if (!xReplitToken) {
-    throw new Error('X_REPLIT_TOKEN not found for repl/depl');
+  if (!apiKey || !fromEmail) {
+    throw new Error('RESEND_API_KEY and RESEND_FROM_EMAIL must be configured');
   }
 
-  connectionSettings = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=resend',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X_REPLIT_TOKEN': xReplitToken
-      }
-    }
-  ).then(res => res.json()).then(data => data.items?.[0]);
-
-  if (!connectionSettings || (!connectionSettings.settings.api_key)) {
-    throw new Error('Resend not connected');
+  if (!cachedClient) {
+    cachedClient = new Resend(apiKey);
   }
-  return {apiKey: connectionSettings.settings.api_key, fromEmail: connectionSettings.settings.from_email};
-}
 
-async function getUncachableResendClient() {
-  const { apiKey, fromEmail } = await getCredentials();
-  return {
-    client: new Resend(apiKey),
-    fromEmail: fromEmail
-  };
+  return { client: cachedClient, fromEmail };
 }
 
 export interface EmailOptions {
@@ -46,8 +25,8 @@ export interface EmailOptions {
 
 export async function sendEmail(options: EmailOptions): Promise<boolean> {
   try {
-    const { client, fromEmail } = await getUncachableResendClient();
-    
+    const { client, fromEmail } = getResendConfiguration();
+
     const { data, error } = await client.emails.send({
       from: fromEmail,
       to: options.to,

@@ -6,7 +6,7 @@ import { checkAvailability, getAvailableSlots, createCalendarEvent } from "./cal
 import bcrypt from "bcrypt";
 import { sql } from "drizzle-orm";
 import { db } from "./db";
-import { orders, appointments, products, services } from "@shared/schema";
+import { orders, appointments, products, services, type Product, type Conversation } from "@shared/schema";
 import Stripe from "stripe";
 import { wsManager, WS_EVENTS } from "./websocket";
 import { subscriptionAutomation } from "./subscription-automation";
@@ -16,6 +16,36 @@ if (!process.env.STRIPE_SECRET_KEY) {
   console.warn('Warning: STRIPE_SECRET_KEY not set. Stripe features will not work.');
 }
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+
+const metaSourceToShop = new Map<string, number>();
+const metaMapping = process.env.META_SHOP_MAP;
+
+if (metaMapping) {
+  for (const pair of metaMapping.split(",")) {
+    const [sourceId, shopIdValue] = pair.split(":").map((value) => value.trim());
+    const parsedShopId = Number(shopIdValue);
+
+    if (sourceId && !Number.isNaN(parsedShopId)) {
+      metaSourceToShop.set(sourceId, parsedShopId);
+    }
+  }
+}
+
+const defaultMetaShopId = process.env.META_DEFAULT_SHOP_ID ? Number(process.env.META_DEFAULT_SHOP_ID) : null;
+
+const ORDER_CONFIRMATION_KEYWORDS = ["processing", "order", "confirmed", "completed", "successfully"];
+
+function resolveMetaShopId(sourceId: string): number | null {
+  if (metaSourceToShop.has(sourceId)) {
+    return metaSourceToShop.get(sourceId)!;
+  }
+
+  if (defaultMetaShopId !== null && !Number.isNaN(defaultMetaShopId)) {
+    return defaultMetaShopId;
+  }
+
+  return null;
+}
 
 // Middleware to check authentication
 const requireAuth = (req: any, res: any, next: any) => {
@@ -42,6 +72,93 @@ const requireRole = (...roles: string[]) => {
 };
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  async function maybeCreateOrderFromConversation(params: {
+    shopId: number;
+    conversation: Conversation;
+    productsList: Product[];
+    aiResponse: string;
+    intent: ReturnType<typeof parseIntent>;
+    recentUserMessages: string;
+    platform?: string;
+  }): Promise<void> {
+    const { shopId, conversation, productsList, aiResponse, intent, recentUserMessages, platform } = params;
+
+    if (intent.type !== "order") {
+      return;
+    }
+
+    const aiResponseNormalized = aiResponse.toLowerCase();
+    if (!ORDER_CONFIRMATION_KEYWORDS.some((keyword) => aiResponseNormalized.includes(keyword))) {
+      return;
+    }
+
+    const nameMatch = recentUserMessages.match(/(?:name is|i'm|i am)\s+([A-Za-z\s]+?)(?:,|\.|and|phone|$)/i);
+    const phoneMatch = recentUserMessages.match(/(?:phone|number|contact)\s*(?:is)?\s*([0-9+\-]+)/i);
+    const quantityMatch = recentUserMessages.match(/(\d+)\s*(?:units?|items?|pieces?)/i);
+
+    const customerName = nameMatch ? nameMatch[1].trim() : conversation.customerName || "Customer";
+    const customerPhone = phoneMatch ? phoneMatch[1].trim() : conversation.customerId;
+    const quantity = quantityMatch ? parseInt(quantityMatch[1], 10) : 1;
+
+    const mentionedProduct = productsList.find((product) => {
+      const productName = product.name.toLowerCase();
+      return recentUserMessages.toLowerCase().includes(productName) || aiResponseNormalized.includes(productName);
+    });
+
+    if (!mentionedProduct) {
+      return;
+    }
+
+    if (mentionedProduct.stock < quantity) {
+      return;
+    }
+
+    const unitPrice = Number(mentionedProduct.price);
+    const unitCost = Number(mentionedProduct.cost ?? 0);
+
+    if (Number.isNaN(unitPrice) || Number.isNaN(unitCost)) {
+      return;
+    }
+
+    const revenue = unitPrice * quantity;
+    const profit = revenue - unitCost * quantity;
+
+    try {
+      const order = await storage.createOrder({
+        shopId,
+        productId: mentionedProduct.id,
+        productName: mentionedProduct.name,
+        quantity,
+        price: unitPrice.toFixed(2),
+        cost: unitCost.toFixed(2),
+        revenue: revenue.toFixed(2),
+        profit: profit.toFixed(2),
+        customerName,
+        customerPhone,
+        platform: platform || conversation.platform,
+        status: "pending",
+      });
+
+      await storage.updateProduct(mentionedProduct.id, shopId, {
+        stock: mentionedProduct.stock - quantity,
+      });
+
+      if (!conversation.customerName && customerName) {
+        await storage.updateConversation(conversation.id, shopId, {
+          customerName,
+        });
+      }
+
+      wsManager.broadcastToShop(shopId, {
+        type: WS_EVENTS.ORDER_CREATED,
+        data: order,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error("[Order Creation Failed]", error);
+    }
+  }
+
   // ==================== AUTHENTICATION ====================
   app.post("/api/auth/register", async (req, res) => {
     try {
@@ -487,7 +604,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Verify webhook signature for security (REQUIRED if META_APP_SECRET is set)
       const signature = req.headers['x-hub-signature-256'];
       const appSecret = process.env.META_APP_SECRET;
-      
+
       if (appSecret) {
         if (!signature) {
           console.error('Meta webhook signature missing');
@@ -511,29 +628,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Handle webhook events
       if (body.object === 'page' || body.object === 'instagram' || body.object === 'whatsapp_business_account') {
         for (const entry of body.entry || []) {
+          const sourceId = entry.id as string | undefined;
+
           // Handle WhatsApp messages
           if (entry.changes) {
             for (const change of entry.changes) {
-              if (change.value?.messages) {
+              if (change.value?.messages && sourceId) {
+                const shopId = resolveMetaShopId(sourceId);
+                if (!shopId) {
+                  console.error(`Meta webhook: unable to resolve shop for source ${sourceId}`);
+                  continue;
+                }
+
                 for (const message of change.value.messages) {
-                  await handleMetaMessage(message, 'whatsapp', entry.id);
+                  const customerId = message.from || message.author;
+                  const text = message.text?.body || message.text || '';
+
+                  if (!customerId) {
+                    continue;
+                  }
+
+                  await handleMetaMessage({
+                    text,
+                    platform: 'whatsapp',
+                    customerId,
+                    shopId,
+                  });
                 }
               }
             }
           }
-          
+
           // Handle Messenger/Instagram messages
           if (entry.messaging) {
             for (const event of entry.messaging) {
               if (event.message) {
                 const platform = body.object === 'instagram' ? 'instagram' : 'messenger';
-                await handleMetaMessage(event.message, platform, event.sender.id);
+                const customerId = event.sender?.id;
+                const businessId = sourceId || event.recipient?.id;
+                const text = event.message.text || '';
+
+                if (!customerId || !businessId) {
+                  continue;
+                }
+
+                const shopId = resolveMetaShopId(businessId);
+                if (!shopId) {
+                  console.error(`Meta webhook: unable to resolve shop for source ${businessId}`);
+                  continue;
+                }
+
+                await handleMetaMessage({
+                  text,
+                  platform,
+                  customerId,
+                  shopId,
+                });
               }
             }
           }
         }
       }
-      
+
       res.sendStatus(200);
     } catch (error: any) {
       console.error('Meta webhook error:', error);
@@ -542,54 +698,82 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Helper function to handle Meta messages
-  async function handleMetaMessage(message: any, platform: string, senderId: string) {
+  async function handleMetaMessage(payload: {
+    text: string;
+    platform: string;
+    customerId: string;
+    shopId: number;
+  }) {
     try {
-      const text = message.text?.body || message.text || '';
-      
-      if (!text) return;
-      
-      // Find or create conversation
-      let conversation = await storage.getConversationByCustomerId(senderId);
-      
+      const { text, platform, customerId, shopId } = payload;
+
+      if (!text.trim()) {
+        return;
+      }
+
+      let conversation = await storage.getConversationByCustomerId(customerId, shopId);
+
       if (!conversation) {
-        // Create new conversation with platform tracking
         conversation = await storage.createConversation({
-          shopId: 1, // Default shop - should be mapped from senderId in production
-          customerId: senderId,
+          shopId,
+          customerId,
           platform,
           status: 'active',
         });
       }
-      
-      // Store customer message
+
       await storage.createMessage({
         conversationId: conversation.id,
-        sender: 'customer',
+        role: 'user',
         content: text,
       });
-      
-      // Generate AI response
-      const aiResponse = await generateAIResponse(text, conversation.shopId);
-      
-      // Store AI response
+
+      const [shop, productsList, servicesList, messageHistory] = await Promise.all([
+        storage.getShop(shopId),
+        storage.getProducts(shopId),
+        storage.getServices(shopId),
+        storage.getMessages(conversation.id),
+      ]);
+
+      const aiResponse = await generateAIResponse(text, {
+        products: productsList,
+        services: servicesList,
+        businessType: (shop?.businessType as 'product' | 'service') || 'product',
+        businessName: shop?.name || 'Our Business',
+        conversationHistory: messageHistory.map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+      });
+
       await storage.createMessage({
         conversationId: conversation.id,
-        sender: 'ai',
+        role: 'assistant',
         content: aiResponse,
       });
-      
-      // Send response back through Meta Graph API
-      await sendMetaMessage(senderId, aiResponse, platform);
-      
-      // Check for intent and create order/appointment if needed
-      const intent = await parseIntent(text);
-      if (intent.type === 'order') {
-        // Handle order creation
-        console.log('Order intent detected:', intent);
-      } else if (intent.type === 'appointment') {
-        // Handle appointment creation
-        console.log('Appointment intent detected:', intent);
-      }
+
+      await storage.updateConversation(conversation.id, shopId, {
+        lastMessageAt: new Date(),
+      });
+
+      await sendMetaMessage(customerId, aiResponse, platform);
+
+      const intent = parseIntent(text);
+      const lastUserMessages = messageHistory
+        .filter((message) => message.role === 'user')
+        .slice(-3)
+        .map((message) => message.content)
+        .join(' ');
+
+      await maybeCreateOrderFromConversation({
+        shopId,
+        conversation,
+        productsList,
+        aiResponse,
+        intent,
+        recentUserMessages: lastUserMessages,
+        platform,
+      });
     } catch (error: any) {
       console.error('Error handling Meta message:', error);
     }
@@ -644,18 +828,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(500).json({ message: "Stripe not configured" });
     }
 
-    const sig = req.headers['stripe-signature'];
-    
-    if (!sig) {
+    const signatureHeader = req.headers['stripe-signature'];
+    const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+
+    if (!signature) {
       return res.status(400).json({ message: "No signature" });
     }
 
     let event: Stripe.Event;
 
     try {
-      // In production, verify with webhook secret
-      // For now, just parse the event
-      event = req.body as Stripe.Event;
+      const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+      if (webhookSecret) {
+        const rawBody = req.rawBody;
+
+        if (!rawBody) {
+          throw new Error('Unable to read raw request body for Stripe verification');
+        }
+
+        const bufferBody = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody as any);
+        event = stripe.webhooks.constructEvent(bufferBody, signature, webhookSecret);
+      } else {
+        console.warn('STRIPE_WEBHOOK_SECRET not configured; skipping signature verification');
+        event = req.body as Stripe.Event;
+      }
     } catch (err: any) {
       console.error('Webhook signature verification failed:', err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -867,60 +1064,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Check if we should create an order or appointment based on the FULL conversation
       const fullHistory = await storage.getMessages(conversationId);
-      const lastUserMessages = fullHistory.filter(m => m.role === "user").slice(-3).map(m => m.content).join(" ");
-      
-      // Try to detect order creation after AI confirms
-      if (intent.type === "order" && aiResponse.toLowerCase().includes("processing") || aiResponse.toLowerCase().includes("order")) {
-        // Extract customer info from conversation
-        const nameMatch = lastUserMessages.match(/(?:name is|i'm|i am)\s+([A-Za-z\s]+?)(?:,|\.|and|phone|$)/i);
-        const phoneMatch = lastUserMessages.match(/(?:phone|number|contact)\s*(?:is)?\s*([0-9\-]+)/i);
-        const quantityMatch = lastUserMessages.match(/(\d+)\s*(?:units?|items?|pieces?)/i);
-        
-        const customerName = nameMatch ? nameMatch[1].trim() : conversation.customerName || "Customer";
-        const customerPhone = phoneMatch ? phoneMatch[1].trim() : "N/A";
-        const quantity = quantityMatch ? parseInt(quantityMatch[1]) : 1;
-        
-        // Find the product mentioned
-        const mentionedProduct = productsList.find(p => 
-          lastUserMessages.toLowerCase().includes(p.name.toLowerCase()) ||
-          aiResponse.toLowerCase().includes(p.name.toLowerCase())
-        );
-        
-        if (mentionedProduct && mentionedProduct.stock >= quantity) {
-          try {
-            const totalPrice = parseFloat(mentionedProduct.price) * quantity;
-            const totalCost = parseFloat(mentionedProduct.cost) * quantity;
-            
-            const order = await storage.createOrder({
-              shopId: user.shopId,
-              productId: mentionedProduct.id,
-              customerName,
-              customerPhone,
-              quantity,
-              totalPrice: totalPrice.toString(),
-              revenue: totalPrice.toString(),
-              profit: (totalPrice - totalCost).toString(),
-              status: "pending",
-            });
-            
-            // Update product stock
-            await storage.updateProduct(mentionedProduct.id, user.shopId, {
-              stock: mentionedProduct.stock - quantity,
-            });
-            
-            // Broadcast order event
-            wsManager.broadcastToShop(user.shopId, {
-              type: WS_EVENTS.ORDER_CREATED,
-              data: order,
-              timestamp: Date.now(),
-            });
-            
-            console.log(`[Order Created] Order #${order.id} for ${customerName} - ${quantity}x ${mentionedProduct.name}`);
-          } catch (error) {
-            console.error("[Order Creation Failed]", error);
-          }
-        }
-      }
+      const lastUserMessages = fullHistory
+        .filter(m => m.role === "user")
+        .slice(-3)
+        .map(m => m.content)
+        .join(" ");
+
+      await maybeCreateOrderFromConversation({
+        shopId: user.shopId,
+        conversation,
+        productsList,
+        aiResponse,
+        intent,
+        recentUserMessages: lastUserMessages,
+        platform: conversation.platform,
+      });
 
       // Update conversation timestamp
       await storage.updateConversation(conversationId, user.shopId, {
