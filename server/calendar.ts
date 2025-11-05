@@ -43,7 +43,8 @@ export async function checkAvailability(
       },
     });
 
-    const busySlots = response.data.calendars?.primary?.busy || [];
+    const busyCalendars = response.data.calendars ?? {};
+    const busySlots = busyCalendars[calendarId]?.busy ?? busyCalendars.primary?.busy ?? [];
     return busySlots.length === 0;
   } catch (error) {
     console.error('Error checking calendar availability:', error);
@@ -76,7 +77,8 @@ export async function getAvailableSlots(
       },
     });
 
-    const busySlots = response.data.calendars?.primary?.busy || [];
+    const busyCalendars = response.data.calendars ?? {};
+    const busySlots = busyCalendars[calendarId]?.busy ?? busyCalendars.primary?.busy ?? [];
     
     // Generate potential time slots
     const slots: Date[] = [];

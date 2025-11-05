@@ -574,6 +574,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "Shop not found" });
       }
 
+      const originHeader = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
+      const fallbackBaseUrl = process.env.APP_BASE_URL;
+      const baseUrl = originHeader || fallbackBaseUrl;
+
+      if (!baseUrl) {
+        return res.status(500).json({
+          message: "Unable to determine redirect URL. Set APP_BASE_URL or include an Origin header.",
+        });
+      }
+
+      const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+
       // Price mapping (in cents)
       const priceMap: Record<string, number> = {
         starter: 2900, // $29
@@ -616,8 +628,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           },
         ],
         mode: 'subscription',
-        success_url: `${req.headers.origin}/subscription?success=true`,
-        cancel_url: `${req.headers.origin}/subscription?canceled=true`,
+        success_url: `${normalizedBaseUrl}/subscription?success=true`,
+        cancel_url: `${normalizedBaseUrl}/subscription?canceled=true`,
         metadata: {
           shopId: shop.id.toString(),
           plan,
